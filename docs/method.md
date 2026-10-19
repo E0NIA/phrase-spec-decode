@@ -2,8 +2,10 @@
 
 ## The idea in one paragraph
 
-Ordinary speculative decoding drafts **one target token at a time** and needs a draft
-model that shares the target's vocabulary. This drafts a **whole phrase as one unit**.
+Ordinary speculative decoding drafts **one target token per draft-model step**, and
+reaches further ahead by running that draft model autoregressively — EAGLE-3 takes
+seven steps to build a depth-7 tree. It also needs a draft model that shares the
+target's vocabulary. This drafts a **whole phrase as one unit**.
 A small head reads the target's last hidden state and produces a distribution over its
 own vocabulary, whose entries are 1–3 word strings rather than tokens. The top-N
 entries are expanded back into target tokens, merged into a prefix tree, and verified
@@ -114,8 +116,12 @@ reaches 0.143, so this is not an argument that favours us at matched budget.
 
 ## Where it loses
 
-- **Drafting quality, not cost.** We feed *fewer* nodes than EAGLE (46 against 60) and
-  bank fewer tokens (2.742 against 3.811). The verifier is cheap; the guesses are worse.
+- **Drafting quality, not cost.** Per verification pass on GSM8K our arm costs
+  **79.0 ms against a 63.7 ms baseline (+24%)**, while EAGLE-3 costs **92.7 against
+  59.6 (+56%)** — one head forward and a lookup against seven autoregressive draft
+  forwards. Our pass is 15% cheaper, we feed fewer nodes (46 against 60), and we still
+  lose because we bank 2.742 tokens in it against 3.811. The verifier and the draft are
+  cheap; the guesses are worse.
 - **Long answers.** Speedup falls with generation length. On MATH-500 we are level with
   EAGLE on the typical prompt and 12% behind across the whole workload, and the whole
   difference is the long answers — the set averages 571 tokens.

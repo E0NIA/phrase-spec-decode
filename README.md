@@ -21,14 +21,37 @@ both sides, loaded from the same file (`results/e89_prompts.json`, sha `5c3a2f18
 | **GSM8K** | N32 | 2.211 | 2.742 | 28.8 | tree 60 | 2.451 | 3.811 | 24.3 | +4.44 [+3.77, +5.20] |
 | **MT-Bench** | N16 | 1.402 | 1.672 | 45.4 | tree 60 | 2.005 | 3.324 | 29.0 | +14.03 [+11.02, +16.69] |
 
-| | ours | EAGLE-3 |
+| | ours | EAGLE-3 (tree 60) |
 |---|---|---|
 | draft parameters | **21,937,792** (0.545% of target) | 218,245,120 (5.426%) |
 | training data | ~3 M distilled maths tokens | ShareGPT + UltraChat |
-| drafting unit | 1–3 word phrase, own vocabulary | N depth target token |
+| drafting vocabulary | its own: 80,000 entries of 1–3 words | 32,000 of the target's own tokens |
+| tokens per draft step | **~2.46** (one phrase, expanded by lookup) | 1 |
+| draft steps per verification pass | **1** | **7**, autoregressive |
+| candidate structure | N chains merged into a prefix tree, ~2.5 deep | depth 7, top-10 beams, 60 nodes |
+| draft compute per verification pass | 21.9 M parameter-forwards | ~1,528 M (**70×** ours) |
 
 **The claim: level with EAGLE-3 on MATH-500 and within 18% on GSM8K, with a draft head
 10× smaller and three of its knobs never tuned.** Not that it beats EAGLE-3.
+
+### Both methods draft multiple tokens; they get there differently
+
+EAGLE-3 reaches depth by running its draft model **autoregressively, seven times**
+per verification pass, building a branching tree of 60 nodes. We reach depth in **one**
+head forward, because a vocabulary entry *already is* several tokens — the expansion is
+a table lookup, not a forward. So the depth is comparable and the draft cost is not.
+
+Decomposing the measured GSM8K numbers per verification pass:
+
+| | baseline ms/pass | arm ms/pass | drafting overhead | tok/pass |
+|---|---|---|---|---|
+| ours, N32 | 63.7 | **79.0** | **+24%** | 2.742 |
+| EAGLE-3, tree 60 | 59.6 | **92.7** | **+56%** | 3.811 |
+
+**Our pass is 15% cheaper and we still lose, because we bank 28% fewer tokens in it.**
+That is the whole result in one line: the verifier and the draft cost are not the
+problem — prediction quality is. It is also why the untuned knobs matter so much, since
+all three of them act on exactly that.
 
 MT-Bench is the honest bound on generality — the head has only ever seen maths, and
 chat is out of distribution. It is reported for that reason.
