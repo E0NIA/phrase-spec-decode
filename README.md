@@ -25,7 +25,7 @@ both sides, loaded from the same file (`results/e89_prompts.json`, sha `5c3a2f18
 |---|---|---|
 | draft parameters | **21,937,792** (0.545% of target) | 218,245,120 (5.426%) |
 | training data | ~3 M distilled maths tokens | ShareGPT + UltraChat |
-| drafting unit | 1–3 word phrase, own vocabulary | one target token |
+| drafting unit | 1–3 word phrase, own vocabulary | N depth target token |
 
 **The claim: level with EAGLE-3 on MATH-500 and within 18% on GSM8K, with a draft head
 10× smaller and three of its knobs never tuned.** Not that it beats EAGLE-3.
