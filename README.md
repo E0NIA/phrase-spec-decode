@@ -70,9 +70,15 @@ different greedy loops).
 
 ### Exactness
 
-98 divergences from the baseline across 300 arm runs, **0 of them confident**: worst
-logit margin 0.0625 against a 0.5 fp16 threshold. Every divergence is a tie-break, so
-nothing here buys speed with quality.
+98 divergences from the baseline across **420 arm runs** (3 arms x 140 prompts) —
+**0 of them confident**: worst logit margin 0.0625 against a 0.5 fp16 threshold.
+
+Per token position that is **0.57 divergences per 1,000 tokens** over 170,490 positions.
+For scale, **EAGLE-3 through its own official code scores 0.57 per 1,000 on these same
+prompts** (64 of 280 runs) — the same rate, so this is what fp16 greedy decoding does
+when batch shape changes, not something either method introduces. Ours are classified
+as tie-breaks by a margin check; E89 did not classify EAGLE's, so that comparison is of
+rates and not of confirmed-benign rates.
 
 ## Reproducing it
 

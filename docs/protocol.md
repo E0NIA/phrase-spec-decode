@@ -75,8 +75,18 @@ argmax and the top-2 logit margin, which classifies the divergence instead of
 attributing it. A divergence with margin ≥ 0.5 (fp16) would be a real correctness
 failure.
 
-Measured: **98 divergences across 300 arm runs, 0 confident, worst margin 0.0625.**
-Every one is a tie-break.
+Measured: **98 divergences across 420 arm runs** (3 arms x 140 prompts), **0 confident**, worst margin **0.0625**. Every one is a tie-break.
+
+The interpretable form is per token position: 98 over 170,490 positions is **0.57 per
+1,000 tokens**. EAGLE-3 through its own official code scores **0.57 per 1,000** on the
+same prompts (64 of 280 runs). The rates are identical, which is the expected result:
+the baseline pushes one token through the model while an arm pushes a tree of ~46
+nodes through in one pass, so the two accumulate the same matmul in a different order
+and disagree in the last bits. Where the top-2 logit gap is smaller than that error,
+which token wins is decided by rounding rather than by the model.
+
+Note E89 did not margin-classify its 64, so we know its rate matches ours, not that
+all 64 were benign.
 
 ## Contamination
 
