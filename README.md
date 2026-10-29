@@ -1,154 +1,228 @@
-# Phrase-level speculative decoding across tokenizers
+# Phrase-level speculative decoding on a frozen target
 
-A **21.9 M-parameter** draft head reads the target model's hidden state and predicts a
-whole **1–3 word phrase** as a single entry in its own vocabulary. The phrase is
-expanded to target tokens, N candidates are verified in **one** target forward pass
-with a 4-D tree-attention mask, and the longest matching prefix is accepted. Output is
-identical to greedy decoding up to fp16 tie-breaking.
+Speculative decoders raise throughput by banking more target tokens per forward pass,
+and Medusa, EAGLE-3, DFlash and DSpark all do it the same way: more candidates that
+survive verification, through deeper and wider trees, extra draft heads and better draft
+accuracy. All of them draft in the **target's own vocabulary**, so one node of the
+candidate tree is one target token, and that unit goes unquestioned because the
+tokenizer makes it look like a constant.
 
-The point is the ratio: a draft head **10× smaller** than EAGLE-3's, trained on **~3 M
-tokens**, measured against EAGLE-3 on the same prompts, same card, same protocol.
+It is not. BPE's pretokenizer splits on whitespace before merges are learned, so no
+multi-word string can ever become a single token. In Qwen3-4B, "United States of
+America" is four tokens and no adjacent pair of them exists as one entry — which puts a
+phrase out of reach of any method that drafts in the target's vocabulary.
+
+**We change the unit.** A small MLP head reads the target's last hidden state and
+predicts a **1–3 word phrase as one entry** in a separate draft vocabulary. Greedy
+longest-match expansion maps that entry back into the target's own tokens, and N
+candidates are verified in **one** forward pass behind a 4-D prefix-tree mask. The
+change is orthogonal to tree depth and width and composes with them. The target model
+and its tokenizer stay frozen, and verification is greedy-exact — a drafted token is
+accepted only if it equals the target's own argmax — so the served output is
+bit-identical to greedy decoding by construction, up to fp16 tie-breaking.
+
+This repository holds the two small heads, at **3.43 M** and **11.66 M** parameters
+(0.085% and 0.290% of Qwen3-4B), and the benchmark that measures them against one
+shared baseline.
 
 ## Result
 
-Qwen3-4B, one Tesla T4, fp16, batch 1, temperature 0, EOS-terminated with a 2048-token
-cap — DFlash Table 1's protocol. Same 50 GSM8K + 50 MATH-500 + 40 MT-Bench prompts on
-both sides, loaded from the same file (`results/e89_prompts.json`, sha `5c3a2f181dd5`).
+One A5000, fp16, batch 1, temperature 0, EOS-terminated with a 2048-token cap — DFlash
+Table 1's protocol. The same 50 GSM8K + 50 MATH-500 + 40 MT-Bench prompts throughout,
+loaded from `results/e89_prompts.json` (sha `5c3a2f181dd5`) rather than redrawn. Both
+heads are trained on maths distillation only, so **MT-Bench is zero-shot cross-domain
+transfer** and is marked as such.
 
-| set | ours | speedup | tok/pass | ms/tok | EAGLE-3 | speedup | tok/pass | ms/tok | paired Δ ms/tok (95% CI) |
-|---|---|---|---|---|---|---|---|---|---|
-| **MATH-500** | N16 | 2.037 | 2.620 | 31.3 | tree 16 | 2.061 | 3.035 | 27.9 | **+0.66 [−0.21, +1.58] — tie** |
-| **GSM8K** | N32 | 2.211 | 2.742 | 28.8 | tree 60 | 2.451 | 3.811 | 24.3 | +4.44 [+3.77, +5.20] |
-| **MT-Bench** | N16 | 1.402 | 1.672 | 45.4 | tree 60 | 2.005 | 3.324 | 29.0 | +14.03 [+11.02, +16.69] |
+| set | arm | draft params | N | tok/pass | ms/tok | speedup | vs eagle3-16 |
+|---|---|---|---|---|---|---|---|
+| **GSM8K** | ours 8k | **3.43 M** | 32 | 2.520 | 16.67 | **2.299×** | 92.1% |
+| | ours 40k | 11.66 M | 16 | 2.438 | 16.78 | **2.298×** | 92.1% |
+| | eagle3-16 | 218 M | — | 3.296 | 15.30 | 2.496× | — |
+| | eagle3-60 | 218 M | — | 3.809 | 13.73 | 2.790× | — |
+| **MATH-500** | ours 8k | **3.43 M** | 16 | 2.370 | 17.37 | **2.200×** | 88.2% |
+| | ours 40k | 11.66 M | 16 | 2.412 | 17.38 | **2.218×** | **89.0%** |
+| | eagle3-16 | 218 M | — | 3.067 | 15.98 | 2.493× | — |
+| | eagle3-60 | 218 M | — | 3.525 | 13.97 | 2.757× | — |
+| **MT-Bench** *(transfer)* | ours 8k | **3.43 M** | 32 | 1.654 | 24.73 | **1.595×** | 72.0% |
+| | ours 40k | 11.66 M | 16 | 1.529 | 27.30 | **1.450×** | 65.5% |
+| | eagle3-16 | 218 M | — | 2.839 | 17.90 | 2.214× | — |
+| | eagle3-60 | 218 M | — | 3.312 | 15.22 | 2.608× | — |
 
-| | ours | EAGLE-3 (tree 60) |
-|---|---|---|
-| draft parameters | **21,937,792** (0.545% of target) | 218,245,120 (5.426%) |
-| training data | ~3 M distilled maths tokens | ShareGPT + UltraChat |
-| drafting vocabulary | its own: 80,000 entries of 1–3 words | 32,000 of the target's own tokens |
-| tokens per draft step | **~2.46** (one phrase, expanded by lookup) | 1 |
-| draft steps per verification pass | **1** | **7**, autoregressive |
-| candidate structure | N chains merged into a prefix tree, ~2.5 deep | depth 7, top-10 beams, 60 nodes |
-| draft compute per verification pass | 21.9 M parameter-forwards | ~1,528 M (**70×** ours) |
-
-**The claim: level with EAGLE-3 on MATH-500 and within 18% on GSM8K, with a draft head
-10× smaller and three of its knobs never tuned.** Not that it beats EAGLE-3.
+**The claim: a 3.43 M head reaches 92.1% of EAGLE-3 tree-16's GSM8K speedup at 1.6% of
+its draft parameters, and 88.2% on MATH-500.** Not that it beats EAGLE-3 — it does not,
+on any set. On MT-Bench it is 28–35% behind, and that is the set neither head was
+trained for.
 
 ### Both methods draft multiple tokens; they get there differently
 
-EAGLE-3 reaches depth by running its draft model **autoregressively, seven times**
-per verification pass, building a branching tree of 60 nodes. We reach depth in **one**
-head forward, because a vocabulary entry *already is* several tokens — the expansion is
-a table lookup, not a forward. So the depth is comparable and the draft cost is not.
+EAGLE-3 reaches depth by running its draft model **autoregressively, seven times** per
+verification pass, building a branching tree of 60 nodes. We reach depth in **one** head
+forward, because a vocabulary entry *already is* several tokens — the expansion is a
+table lookup, not a forward. The depth is comparable; the draft cost is not.
 
-Decomposing the measured GSM8K numbers per verification pass:
+| | ours 8k | ours 40k | EAGLE-3 (tree 60) |
+|---|---|---|---|
+| draft parameters | **3,433,792** (0.085%) | 11,657,792 (0.290%) | 218,245,120 (5.426%) |
+| drafting vocabulary | its own: 8,000 entries of 1–3 words | its own: 40,000 | 32,000 of the target's own tokens |
+| mean target tokens per entry | 2.498 | 3.045 | 1 |
+| draft steps per verification pass | **1** | **1** | **7**, autoregressive |
+| draft compute per verification pass | 3.4 M parameter-forwards | 11.7 M | ~1,528 M (**445×** the 8k head) |
+| training data | ~3 M distilled maths tokens | ~3 M | ShareGPT + UltraChat |
 
-| | baseline ms/pass | arm ms/pass | drafting overhead | tok/pass |
-|---|---|---|---|---|
-| ours, N32 | 63.7 | **79.0** | **+24%** | 2.742 |
-| EAGLE-3, tree 60 | 59.6 | **92.7** | **+56%** | 3.811 |
+## What the baseline is
 
-**Our pass is 15% cheaper and we still lose, because we bank 28% fewer tokens in it.**
-That is the whole result in one line: the verifier and the draft cost are not the
-problem — prediction quality is. It is also why the untuned knobs matter so much, since
-all three of them act on exactly that.
+Every speedup above divides by **HF `generate()`** — greedy, same card, same prompts,
+same `attn_implementation` — not by our own decode loop. The harness loop is timed
+beside it on GSM8K inside the same process, and comes in at **+1.17% with 0 of 50
+outputs diverging**, so the two denominators are interchangeable on this card.
 
-MT-Bench is the honest bound on generality — the head has only ever seen maths, and
-chat is out of distribution. It is reported for that reason.
+One wrinkle is load-bearing. EAGLE-3 pins `transformers==4.53.1`, our harness runs on
+5.x, and a single process cannot hold both, so HF `generate()` is measured once per
+environment: **38.522 / 39.337 / 39.961** ms/tok under 4.53.1 against **36.460 / 36.920
+/ 36.626** under 5.x. The library version alone is worth **5.7–9.1%** of a speedup
+number. Table 1 therefore divides every row by the 4.53.1 figure EAGLE-3 is itself
+measured against:
 
-### Why the paired column is the one to read
+```
+speedup = base_4.53 / (arm_ms_tok × (1 + len_delta))
+```
 
-A speedup is a ratio to its own baseline, and the two runs use different baselines:
-ours is our verifier with drafting switched off, EAGLE's is `naivegenerate` from its
-own repository. Ours measures **63.7 ms/token** against EAGLE's **59.6**, consistently
-across all three sets — that is our Python, not the model, and it **inflates our
-speedup column by ~7%**. Milliseconds per generated token contains no baseline, so the
-paired test compares the two methods directly. Pairing is by `(set, prompt index)`, and
-baseline token counts agree **50/50 and 40/40 exactly** on GSM8K and MT-Bench
-(47/50 on MATH-500, mean difference 8.7 tokens — fp16 tie-breaking between two
-different greedy loops).
+**`len_delta` is not cosmetic.** A speedup defined as `Σ baseline sec / Σ arm sec` is a
+speed measurement multiplied by a length measurement: when the arm's greedy decode
+diverges from the baseline's on an fp16 tie, the two continuations end at different
+lengths, and that lands directly on the speedup. On MATH-500 it reaches +2.0 to +2.9%
+here, and on a longer run it has reached +5%. It is a column in every CSV for that
+reason and belongs beside any speedup quoted from them.
 
-### Exactness
+The EAGLE-3 column was measured through SafeAILab's own code at a pinned commit, on
+these same prompts, and reproduces DFlash's published Table 1 within 1–2% —
+`tok/pass` 3.809 and 3.525 at tree-60 against their 3.77 and 3.52, 3.296 and 3.067 at
+tree-16 against 3.30 and 3.08. That runner is not in this repository; what is here is
+the baseline it shares.
 
-98 divergences from the baseline across **420 arm runs** (3 arms x 140 prompts) —
-**0 of them confident**: worst logit margin 0.0625 against a 0.5 fp16 threshold.
+## The two heads against each other
 
-Per token position that is **0.57 divergences per 1,000 tokens** over 170,490 positions.
-For scale, **EAGLE-3 through its own official code scores 0.57 per 1,000 on these same
-prompts** (64 of 280 runs) — the same rate, so this is what fp16 greedy decoding does
-when batch shape changes, not something either method introduces. Ours are classified
-as tie-breaks by a margin check; E89 did not classify EAGLE's, so that comparison is of
-rates and not of confirmed-benign rates.
+`ms/tok` carries no denominator, so it is the clean head-to-head. Each row divides by HF
+`generate()` measured in its own process, which is why the two speedup columns should
+not be compared directly and the `ms/tok` column should.
 
-## Reproducing it
+| | ours 8k (3.43 M) | ours 40k (11.66 M) | |
+|---|---|---|---|
+| GSM8K ms/tok | **16.67** (N=32) | 16.78 (N=16) | +0.7% |
+| MATH-500 ms/tok | **17.37** (N=16) | 17.38 (N=16) | +0.1% |
+| MT-Bench ms/tok | **24.73** (N=32) | 27.30 (N=16) | **+10.4%** |
+| top-1 accuracy | **0.511** | 0.441 | |
+| peak verifier memory | 0.26 / 0.44 / 0.72 GB | **0.17** / 1.64 / **0.24** GB | |
 
-No weights are shipped. Three stages, in order — the numbering is the dependency.
+**A 3.4× parameter cut costs 0.1–0.7% on maths and wins 10.4% on chat.** Because the
+draft vocabulary *is* the parameter budget — 88.2% of the head is one output row per
+entry — cutting it from 40,000 to 8,000 entries is most of the saving. The small head's
+higher top-1 matters more on chat than the large vocabulary's longer expansions, and
+everyday conversation needs a few thousand word types rather than forty thousand.
+
+The 40k head reaches GSM8K parity at **N=16 against the 8k head's N=32**, so the larger
+vocabulary buys its position on half the candidates.
+
+*Open: the 40k head's 1.64 GB MATH-500 peak against the 8k head's 0.44 is unexplained.
+It is a single worst-moment watermark over 50 prompts, and the obvious length
+explanation does not hold — that run's generations were shorter on average, not longer.
+Do not quote it as a memory cost until it is checked.*
+
+## What is actually in the draft vocabulary
+
+Both vocabularies are built from a distilled corpus of the target's own maths
+completions, and both are dominated by **formatting rather than English phrases**. The
+twelve most frequent entries are identical in the two heads and are markdown and LaTeX
+scaffolding ahead of any content word: `' *'`, `'*'`, `':'`, `' ='`, `'}'`, `' \'`,
+`' the'`, `'.'`, `'{'`, `' $'`, `'\n$'`, `'\n\n-'`.
+
+| | ours 8k | ours 40k |
+|---|---|---|
+| entries | 8,000 | 40,000 |
+| 1 / 2 / 3 words | 3,863 / 1,645 / 2,457 | 13,874 / 8,689 / 16,629 |
+| multi-word entries | 4,137 | 26,126 |
+| of those, pure letters + whitespace | **467 (11.3%)** | **4,101 (15.7%)** |
+| containing a LaTeX character | 43.4% | 36.7% |
+| containing a digit | 56.2% | 55.6% |
+| containing a newline | 24.4% | 22.6% |
+
+The genuine English phrases exist and are exactly chain-of-thought boilerplate —
+`'We are given'`, `' to find the'`, `' the number of'`, `' Final Answer'`. The word
+counts above use a regex that treats each punctuation character as a word, so a
+"3-word" entry is usually a LaTeX fragment.
+
+This is a measured explanation for the MT-Bench column rather than an excuse for it:
+cross-domain transfer is weak because a third to a half of the phrase budget is spent on
+maths formatting.
+
+**Train/test overlap.** Both heads are trained on completions Qwen3-4B generated from
+MetaMathQA, OpenMathInstruct-2 and similar pools, several of which derive from the same
+problem sources as MATH-500. MATH-500 is therefore the set most exposed to overlap with
+the training distribution, and GSM8K and MT-Bench are the cleaner reads.
+
+## Expansion is an upper bound, not the second factor
+
+Tokens per pass decompose as
+
+```
+tok/pass = 1 + landing × (target tokens banked per accepted draft unit)
+```
+
+where `landing` is the fraction of passes in which at least one drafted token was
+accepted. The mean target tokens per *vocabulary entry* — 2.498 and 3.045 above — is an
+**upper bound** on that second factor rather than the factor itself, because the entries
+that land are not drawn uniformly. `1 + landing × expansion` therefore overshoots the
+measured `tok/pass`, and the measured value is the one to quote.
+
+`tok/pass = 1.000` is an arithmetic floor, not a neutral value: every pass emits at
+least the target's own bonus token. The benchmark asserts it on every arm.
+
+## Reproduce
 
 ```bash
 pip install -r requirements.txt
-
-python pipeline/1_train_head.py      # distils, builds the vocabulary, trains the head
-python pipeline/2_bench_eagle3.py    # EAGLE-3, and writes the shared prompt file
-python pipeline/3_bench_ours.py      # our head on those exact prompts
-python pipeline/4_leakage_check.py   # optional: 8-gram contamination check, CPU only
 ```
 
-Each script is the one that produced the numbers above, unchanged. Paths sit in a
-config block at the top of each; on anything other than Kaggle you will want to edit
-`DISTILL_IN`, `HEADS_IN`, `PROMPTS_IN` and `OUT`.
+`pipeline/e107_clean.py` runs the whole bench in one process: HF `generate()` as the
+shared baseline, the harness loop beside it on GSM8K, then the tree arm at each set's
+best N. It is written to paste into a single Kaggle or Colab cell.
 
-`2_bench_eagle3.py` pins `transformers==4.53.1`, clones
-[SafeAILab/EAGLE](https://github.com/SafeAILab/EAGLE) at commit `cb7e0841fe0c`, and
-applies one patch: Qwen3-4B's attention is wider than its hidden size (32 × 128 = 4096
-against 2560) and the official draft code derives head width from hidden size alone, so
-**it cannot load the 4B head at all** without honouring `config.head_dim`. EAGLE is
-cloned rather than vendored, so no code of theirs lives in this repository.
+Point `HEAD_FILES` at one checkpoint — never two in one run, because row *k* of the head
+means a different unit in each — and the script reads its vocabulary and its SLEM
+expansion table straight out of the file:
 
-Budget on one T4: roughly 3 h for stage 1, 2 h for stage 2, 2.5 h for stage 3.
+```python
+HEAD_FILES = [
+    ("v8k", ".../e97v8k_qwen3-4b_head_hard.pt"),       # 3.43 M
+    # ("post10k", ".../e95_qwen3-4b_head_hard.pt"),    # 11.66 M
+]
+```
 
-### EAGLE-3 is run, not reimplemented
+A checkpoint saved without its expansion table is **refused** rather than rebuilt by
+re-tokenizing each entry: the table holds the modal expansion the target actually
+emitted, and context-free tokenization disagrees with it on about one entry in six. The
+cost of getting it wrong is silent — lower landing, no failed assert, no wrong output.
 
-An earlier version reimplemented the EAGLE-3 draft head from its released checkpoint.
-It was architecturally correct — the parameter count matches 218,245,120 exactly — and
-it still reached only 1.136 tok/pass where the published acceptance length is ~3.4,
-with all four candidate layer triples inside 1.6% of each other. Running the authors'
-own code instead **reproduces DFlash's Table 1 to two decimals** (3.811 and 3.497
-tok/pass against published 3.77 and 3.52). That agreement is the evidence that the
-baseline here is the real one.
-
-## Notebook
-
-`notebook/headtohead.ipynb` runs both arms and renders the comparison. It needs a
-trained head from stage 1; everything after that is in the notebook.
+Writes `e107_rows.csv`, `e107_diverge.csv` and `e107_diag.csv`, and asserts they reached
+disk before exiting.
 
 ## Layout
 
 ```
-pipeline/   the four stages, as run
-results/    per-prompt records, the prompt set, and the aggregate tables
-notebook/   both arms plus the comparison
-docs/       method.md (how it works) · protocol.md (how it was measured)
+pipeline/e107_clean.py   the benchmark: shared baseline, drafter, tree verifier, tables
+results/e89_prompts.json the shared prompt set, sha 5c3a2f181dd5
+results/*.csv            the measured rows behind every table above
 ```
 
-## Caveats, in the table rather than a footnote
+## Caveats
 
-1. **T4 only.** The decode loop is CPU-dispatch-bound — the target forward is 92.6% of
-   a pass and essentially all of that is the CPU issuing work — so these numbers do not
-   transfer to a faster card until that is fixed. The same pipeline on an A5000 measured
-   1.061× with *better* acceptance (tok/pass 2.695), because a faster card shrinks the
-   GPU work and exposes the Python a T4 was slow enough to hide. `tok/pass` is
-   hardware-independent; the speedups are not.
-2. **Undertrained and untuned, so these are floor numbers.** Units cap at 3 words,
-   which caps `tok/pass` at **3.46** however good the head gets — EAGLE already exceeds
-   that at 3.811. The vocabulary sits at an arbitrary 80,000 cap, not an optimum (the
-   parameter budget would allow 150,282). The data ladder has not bent across a 6.5×
-   increase. None of the three has been explored.
-3. **MATH-500 contamination was checked and is not material.** Max 8-gram overlap with
-   the training pool is 0.833 on one prompt against GSM8K's 0.083, with no exact
-   duplicates. Dropping every prompt sharing even one 8-gram (8 of 50) moves EAGLE
-   2.032 → 2.009. `pipeline/4_leakage_check.py` is that check.
+- One card, one target model. `tok/pass` is hardware-independent; the millisecond
+  columns are not.
+- Batch 1 only. Phrase drafting at batch > 1 is not measured here.
+- Maths distillation only. MT-Bench is zero-shot and reported as such.
+- Three knobs — `MAX_GRAM`, `H_DIM` and the labelling rule — were never tuned.
+- The training scripts for these two heads are not in this repository yet.
 
 ## Licence
 
-Apache-2.0. Qwen3-4B, `AngelSlim/Qwen3-4B_eagle3`, GSM8K, MATH-500 and MT-Bench are
-each under their own licences and none of them is redistributed here.
+MIT. See `LICENSE`.

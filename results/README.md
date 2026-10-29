@@ -2,70 +2,58 @@
 
 ## The shared prompt set
 
-`e89_prompts.json` — sha `5c3a2f181dd5`, 31 KB. The 50 GSM8K + 50 MATH-500 + 40
-MT-Bench prompts both methods were measured on. Stage 2 writes it; stage 3 loads it and
-asserts the sha. **This file is why the comparison is on identical prompts** rather
-than on two independent draws that a single differing constant could separate.
+`e89_prompts.json` — sha `5c3a2f181dd5`, 31 KB. The 50 GSM8K + 50 MATH-500 + 40 MT-Bench
+prompts every number in this repository was measured on. `pipeline/e107_clean.py` loads
+it and asserts the sha rather than redrawing the pool.
 
-## Aggregate tables
+That assert is not decoration. An earlier version re-derived the pool in each script,
+and one constant differing between them changed the training-pool dedup filter, which
+changed which test prompts survived, which changed the draw — while an assert built from
+a hand-typed constant table certified that the sets matched. Loading the file removes
+the whole class of error: there is no selection code left to disagree with anything.
 
-### Ours — `pipeline/3_bench_ours.py`
+## Measured rows
 
-| set | n | base ms/tok | mean length | arm | speedup | tok/pass | nodes | fed | banked/fed |
-|---|---|---|---|---|---|---|---|---|---|
-| gsm8k-test | 50 | 63.7 | 276 | N8 | 1.985 | 2.406 | 10.0 | 12.4 | 0.1136 |
-| | | | | N16 | 2.108 | 2.590 | 21.6 | 24.2 | 0.0658 |
-| | | | | **N32** | **2.211** | **2.742** | 46.4 | 49.1 | 0.0355 |
-| math500 | 50 | 63.8 | 571 | N8 | 1.983 | 2.445 | 10.1 | 12.7 | 0.1141 |
-| | | | | **N16** | **2.037** | 2.620 | 21.8 | 24.5 | 0.0661 |
-| | | | | N32 | 2.005 | 2.762 | 46.4 | 49.3 | 0.0357 |
-| mtbench | 40 | 63.6 | 362 | N8 | 1.341 | 1.571 | 7.9 | 9.5 | 0.0601 |
-| | | | | **N16** | **1.402** | 1.672 | 18.6 | 20.3 | 0.0331 |
-| | | | | N32 | 1.348 | 1.679 | 42.6 | 44.3 | 0.0153 |
+One A5000, fp16, batch 1, temperature 0, EOS-terminated with a 2048-token cap. Each file
+is one run of `pipeline/e107_clean.py` against one head.
 
-### EAGLE-3 — `pipeline/2_bench_eagle3.py`
+| file | head | draft params | vocabulary |
+|---|---|---|---|
+| `e107_ours_8k_rows.csv` | v8k | 3,433,792 (0.085% of Qwen3-4B) | 8,000 entries |
+| `e107_ours_40k_rows.csv` | post10k | 11,657,792 (0.290%) | 40,000 entries |
 
-| set | n | naive ms/tok | mean length | arm | speedup | tok/pass | ms/tok |
-|---|---|---|---|---|---|---|---|
-| gsm8k-test | 50 | 59.6 | 276 | tree 60 | **2.451** | **3.811** | 24.3 |
-| | | | | tree 16 | 2.418 | 3.294 | 24.5 |
-| math500 | 50 | 59.8 | 562 | tree 60 | 2.032 | 3.497 | 28.9 |
-| | | | | tree 16 | 2.061 | 3.035 | 27.9 |
-| mtbench | 40 | 59.6 | 362 | tree 60 | 2.005 | 3.324 | 29.0 |
-| | | | | tree 16 | 1.898 | 2.871 | 29.7 |
+Each file holds, per set: the `HF generate()` baseline row, the `run_tree(None)` harness
+row where it was timed, and the arm rows.
 
-DFlash's Table 1 publishes tok/pass 3.77 and 3.52 for trees 60 and 16 on GSM8K and
-MATH-500. Measured here: **3.811 and 3.497.**
-
-## Per-prompt records
-
-| file | what |
+| column | |
 |---|---|
-| `e89_pairs.csv` | 280 rows — EAGLE-3, per prompt: `base_secs`, `arm_secs`, `speedup`, `base_tok`, `arm_tok` |
-| `e89_rows.csv` | the aggregate table above, as written by the run |
-| `e89_diag.csv` | the run's own invariant checks and their values |
-| `e87_pairs.csv` | 120 rows — an **earlier, 12-prompt** run of our head. See the warning below. |
-| `e87_arms.csv`, `e87_ladder.csv` | that run's aggregates and its data-scaling ladder |
+| `arm`, `kind`, `N` | the arm's name, its layout, and the number of candidates per pass |
+| `speedup` | `Σ baseline sec / Σ arm sec` over the same prompts, back to back |
+| `tok_pass` | generated tokens per verification pass. 1.000 is an arithmetic floor |
+| `ms_tok`, `ms_pass` | wall clock per generated token and per verification pass |
+| `rows`, `qper` | mean tree rows and mean query positions fed, per pass |
+| `base_ms_tok` | the baseline this row's `speedup` divides by |
+| `diverge` | prompts whose output differed from `HF generate()`'s, out of `n` |
+| `peak_gb` | peak allocated bytes above the pass's own entry watermark |
+| `len_delta` | the arm's total generated length against the baseline's |
 
-**`e91_pairs.csv` is absent, and that is a recorded failure rather than an omission.**
-The run that produced the "ours" table above saved its diagnostics and its head
-checkpoint but not its tables: `flush()` wrote a list that nothing appends to. The
-aggregate numbers above were recovered from the run log; the per-prompt records were
-not recoverable and the stage has to be re-run to regenerate them. The write function
-now asserts, as a post-condition on the filesystem, that every table it should have
-written exists with the right row count.
+**`speedup` and `len_delta` are not independent.** The identity that holds on every row
+of both files, to five decimal places, is
 
-### Warning about `e87_*.csv`
+```
+speedup = (base_ms_tok / arm_ms_tok) / (1 + len_delta)
+```
 
-Those numbers (GSM8K 2.341×, MATH-500 2.620× at N16) are on **12 prompts** — indices
-0–11 of the 50-prompt pool — not 50. On MATH-500 those 12 average **361 tokens against
-571** over the full set, 36% shorter, and speedup falls with generation length, so that
-figure is inflated by sample composition. GSM8K's 12 *are* representative (274 against
-276 tokens).
+so a `speedup` quoted without its `len_delta` is a speed measurement with a length
+measurement folded into it. On MATH-500 `len_delta` reaches +2.0 to +2.9% here, which
+moves the speedup by that much with no change in per-token cost at all. The mechanism is
+fp16 tie-breaking: once a greedy decode diverges from the baseline's on one tie, the two
+continuations end at different lengths, which is also why `diverge` ranks by answer
+length across the three sets.
 
-Shown independently rather than argued: restricted to the same 12 MATH-500 prompts,
-**EAGLE-3(60) scores 2.181 instead of 2.032 on all 50**. The short subset flatters both
-methods.
+## Reading the table in the top-level README
 
-The 12-prompt figures are kept here for provenance and **should not be quoted.** The
-50-prompt numbers at the top of this file supersede them.
+The headline table rescales both heads onto the `transformers==4.53.1` baseline that
+EAGLE-3 is measured against — 38.522 / 39.337 / 39.961 ms/tok — rather than the 5.x
+baseline recorded in these files. The CSVs carry the raw `base_ms_tok` from their own
+process, so the two numbers are both here and neither is hidden.
