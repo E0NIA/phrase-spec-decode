@@ -39,17 +39,17 @@ transfer** and is marked as such.
 | | ours 40k | 11.66 M | 16 | 2.438 | 16.78 | **2.298×** | 92.1% |
 | | eagle3-16 | 218 M | — | 3.296 | 15.30 | 2.496× | — |
 | | eagle3-60 | 218 M | — | 3.809 | 13.73 | 2.790× | — |
-| **MATH-500** | ours 8k | **3.43 M** | 16 | 2.370 | 17.37 | **2.200×** | 88.2% |
+| **MATH-500** | ours 8k | **3.43 M** | 16 | 2.370 | 17.37 | **2.200×** | 88.3% |
 | | ours 40k | 11.66 M | 16 | 2.412 | 17.38 | **2.218×** | **89.0%** |
 | | eagle3-16 | 218 M | — | 3.067 | 15.98 | 2.493× | — |
 | | eagle3-60 | 218 M | — | 3.525 | 13.97 | 2.757× | — |
-| **MT-Bench** *(transfer)* | ours 8k | **3.43 M** | 32 | 1.654 | 24.73 | **1.595×** | 72.0% |
+| **MT-Bench** *(transfer)* | ours 8k | **3.43 M** | 32 | 1.654 | 24.73 | **1.595×** | 72.1% |
 | | ours 40k | 11.66 M | 16 | 1.529 | 27.30 | **1.450×** | 65.5% |
 | | eagle3-16 | 218 M | — | 2.839 | 17.90 | 2.214× | — |
 | | eagle3-60 | 218 M | — | 3.312 | 15.22 | 2.608× | — |
 
 **The claim: a 3.43 M head reaches 92.1% of EAGLE-3 tree-16's GSM8K speedup at 1.6% of
-its draft parameters, and 88.2% on MATH-500.** Not that it beats EAGLE-3 — it does not,
+its draft parameters, and 88.3% on MATH-500.** Not that it beats EAGLE-3 — it does not,
 on any set. On MT-Bench it is 28–35% behind, and that is the set neither head was
 trained for.
 
@@ -115,10 +115,11 @@ not be compared directly and the `ms/tok` column should.
 | peak verifier memory | 0.26 / 0.44 / 0.72 GB | **0.17** / 1.64 / **0.24** GB | |
 
 **A 3.4× parameter cut costs 0.1–0.7% on maths and wins 10.4% on chat.** Because the
-draft vocabulary *is* the parameter budget — 88.2% of the head is one output row per
-entry — cutting it from 40,000 to 8,000 entries is most of the saving. The small head's
-higher top-1 matters more on chat than the large vocabulary's longer expansions, and
-everyday conversation needs a few thousand word types rather than forty thousand.
+draft vocabulary *is* the parameter budget — one output row of 257 parameters per
+entry, which is 59.9% of the 8k head and 88.2% of the 40k — cutting it from 40,000 to
+8,000 entries is most of the saving. The small head's higher top-1 matters more on chat
+than the large vocabulary's longer expansions, and everyday conversation needs a few
+thousand word types rather than forty thousand.
 
 The 40k head reaches GSM8K parity at **N=16 against the 8k head's N=32**, so the larger
 vocabulary buys its position on half the candidates.
@@ -139,16 +140,19 @@ scaffolding ahead of any content word: `' *'`, `'*'`, `':'`, `' ='`, `'}'`, `' \
 | | ours 8k | ours 40k |
 |---|---|---|
 | entries | 8,000 | 40,000 |
-| 1 / 2 / 3 words | 3,863 / 1,645 / 2,457 | 13,874 / 8,689 / 16,629 |
-| multi-word entries | 4,137 | 26,126 |
-| of those, pure letters + whitespace | **467 (11.3%)** | **4,101 (15.7%)** |
-| containing a LaTeX character | 43.4% | 36.7% |
-| containing a digit | 56.2% | 55.6% |
-| containing a newline | 24.4% | 22.6% |
+| 1 / 2 / 3 words | 4,003 / 1,579 / 2,418 | 14,800 / 8,455 / 16,745 |
+| multi-word entries | 3,997 | 25,200 |
+| of those, pure letters + whitespace | **467 (11.7%)** | **4,101 (16.3%)** |
+| containing a LaTeX character | 43.9% | 37.1% |
+| containing a digit | 55.0% | 54.3% |
+| containing a newline | 24.7% | 22.6% |
 
 The genuine English phrases exist and are exactly chain-of-thought boilerplate —
 `'We are given'`, `' to find the'`, `' the number of'`, `' Final Answer'`. The word
-counts above use a regex that treats each punctuation character as a word, so a
+counts above use the regex the heads were trained with, in which a word is a run of
+alphanumerics plus its leading whitespace, or one standalone punctuation character
+— so the 8k head's 4,003 one-word entries are exactly `UNI_FRAC` (0.5) x 8,000, and no
+entry exceeds `MAX_GRAM = 3`. Because punctuation counts as a word, a
 "3-word" entry is usually a LaTeX fragment.
 
 This is a measured explanation for the MT-Bench column rather than an excuse for it:
